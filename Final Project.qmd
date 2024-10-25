@@ -1,0 +1,556 @@
+---
+title: "NFL Tracking Data Project"
+author: "Brady Detwiler, Devin Abraham, Dylan Rauum, Wyatt Bellinger"
+format:
+
+ pdf: default
+
+fontsize: 10pt
+
+geometry: margin=1in
+---
+
+Our data set is player tracking data from the first nine weeks of the 2023-2024 NFL season. This is a subset of the full player tracking data. This data set has data for each player on the field for every 10th of a second. Some plays, for example, scrambles and completions, only include five frames before and after the action. Some of the main columns are gameID, which is a unique ID for each game, playID, which is a unique ID for each play, and nflID, which is a unique ID for each player. In addition, the set has x and y, which are the positions of the player on the field in the long and short way, respectively. S and a, which are the speed and acceleration of the player in yards per second and yards per second squared, respectively. We also have supplementary data which includes extra information about the players, overall game data, play by play data, and specific information on every tackle.
+
+```{r}
+library(nflverse)
+library(tidyverse)
+library(stringr)
+library(dplyr)
+library(readr)
+library(data.table)
+library(ggplot2)
+library(treemapify)
+library(ggradar)
+
+#This first section of code will be to explore the data, just to get some ideas of what to do
+#make sure your directory call is right
+games <- read.csv('games.csv')
+players <- read.csv('players.csv')
+plays <- read.csv('plays.csv')
+tackles <- read.csv('tackles.csv')
+data <- read.csv('all_weeks_data.csv')
+
+slanted_mean <- function(data){
+  lower_bound <- quantile(data, 0.05)
+  upper_bound <- quantile(data, 0.95)
+  new_data <- data[data>lower_bound & data<upper_bound]
+  return(mean(new_data, na.rm=TRUE))
+}
+
+college_data <- merge(data, players, by='nflId') %>% group_by(nflId) %>%
+  summarise(
+    max_speed = max(s, na.rm=TRUE),
+    avg_speed = slanted_mean(s),
+    max_accel = max(a, na.rm=TRUE),
+    avg_accel = slanted_mean(a),
+    height = first(height),
+    weight = mean(weight, na.rm=TRUE),
+    college = first(collegeName),
+    position = first(position),
+    birth_date = first(birthDate),
+    name = first(displayName.x))
+
+convert_to_inches <- function(height) {
+  parts <- strsplit(height, "-")[[1]]
+  feet <- as.numeric(parts[1])
+  inches <- as.numeric(parts[2])
+  total_inches <- (feet * 12) + inches
+  return(total_inches)
+}
+
+find_age <- function(year){
+  birth_date <- strsplit(year, "-")[[1]]
+  birth_year <- as.numeric(birth_date[1])
+  return(2022-birth_year)
+}
+
+college_data['heightIN'] <- sapply(college_data$height, convert_to_inches)
+college_data['age'] <- sapply(college_data$birth_date, find_age)
+
+
+
+by_age <- college_data %>% group_by(age) %>% 
+  summarise(mean_speed = mean(max_speed), 
+            mean_acceleration=mean(max_accel))%>%arrange(age) %>% filter(!is.na(age))
+
+```
+
+```{r}
+{
+plot_player <- function(player_name, game_id, play_id, data, player_color) {
+  player_data <- subset(data, displayName == player_name & gameId == game_id & playId == play_id)
+  if (nrow(player_data) == 0) {
+    warning(paste("No data found for", player_name, "in game", game_id, "and play", play_id))
+    return(NULL)
+  }
+  lines(player_data$x, player_data$y, col = player_color, lwd = 2)
+}
+
+plot_play_movement <- function(game_id, play_id, data) {
+  play_data <- subset(data, gameId == game_id & playId == play_id)
+  
+  if (nrow(play_data) == 0) {
+    warning(paste("No data found for game", game_id, "and play", play_id))
+    return(NULL)
+  }
+  teams <- unique(play_data$club[play_data$displayName != "football"])
+  
+  team_colors <- rainbow(length(teams))
+  names(team_colors) <- teams
+  
+  football_color <- "brown"
+  
+  plot(NULL, xlim = c(0, 120), ylim = c(0, 53.3),
+       xlab = 'X Position (yards)', ylab = 'Y Position (yards)',
+       main = paste("Player Movements for Game", game_id, "Play", play_id))
+  
+  rect(0, 0, 120, 53.3, border = "green", lwd = 2)
+  rect(0, 0, 10, 53.3, border = "black", lwd = 2)
+  rect(110, 0, 120, 53.3, border = "black", lwd = 2)
+  
+  for (player in unique(play_data$displayName)) {
+    if (player == "football") {
+      player_color <- football_color
+    } else {
+      player_team <- unique(play_data$club[play_data$displayName == player])
+      player_color <- team_colors[player_team]
+    }
+    plot_player(player, game_id, play_id, data, player_color)
+  }
+  
+  legend_labels <- c(teams, "Football")
+  legend_colors <- c(team_colors, football_color)
+  legend("topright", legend = legend_labels, col = legend_colors, lwd = 2, bg = "white")
+}
+
+plot_play_movement(2022101603, 346, data) #convert to an animation
+}
+```
+
+As our data is spatiotemporal in nature, it can be hard to visualize extactly what it is. To aid in that we created an animation which displays how the data can be interpreted. Each 
+
+The plot_player function is responsible for plotting the trajectory of an individual player. It takes the player's name, game ID, play ID, the dataset, and a designated color as inputs. The function filters the dataset to extract the relevant positional data for the specified player within the given game and play, and draws a colored line representing the player's movement across the field. The plot_play_movement function orchestrates the overall visualization for a particular play. It begins by subsetting the data for the specified game and play, identifying the unique teams involved, and assigning each team a distinct color, while the football is colored brown. The function then initializes an empty plot that accurately represents the dimensions of a football field, including the end zones. It iterates through each player involved in the play, invoking the plot_player function to draw their movement paths in their respective team colors. After plotting all player movements, plot_play_movement adds a legend to the top right corner of the plot, clearly indicating the teams and the football with their associated colors.
+
+Our example graph using this function comes from a game between the Colts and the Jaguars. This play was a run play, during which the Jaguars running back ran for 25 yards, eventually being tackled out of bounds on the sideline.
+
+```{r}
+
+by_age <- by_age[order(by_age$age),]
+by_age <- by_age[!is.na(by_age$age),]
+by_age <- by_age[!is.na(by_age$mean_speed),]
+
+
+```
+
+The below plots are barplot used to display the change in speed and acceleration as a player ages. Across the x-axis of both plots are the ages in years of players ranging from 23 to 45, while in the first plot the y axis is speed and in the second plot the y axis is acceleration. Speed is represented by the average max speed achieved by players in that age group, and acceleration is represented by the average max acceleration achieved by players in that age group.
+
+```{r}
+
+
+{
+par(mar = c(5, 4, 4, 2) + 0.1)
+barplot(by_age$mean_speed, ylim=c(0,10), xlim=c(0,23), ylab='Average Max Speed', xlab='Age', main='Average Max Speed of Players by Age')
+text(x=seq(.7, 23, 1.2), y=c(.3), labels=by_age$age)
+text(x=seq(.7, 23, 1.2), y=(by_age$mean_speed-.5), labels=round(by_age$mean_speed,1))
+}
+
+```
+
+The speed plot seemed to show a pretty solid correlation that as players age, they become slower. The trend is very distinct between the ages of around 23-31, while more variance is shown in later ages. This variance makes sense as the vast majority of players are between the ages of 23-31, so the smaller sample size for larger ages explains this variation.
+
+```{r}
+{barplot(by_age$mean_acceleration, ylim=c(0,13), xlim=c(0,23), ylab='Average Max Acceleration', xlab='Age', main='Average Max Acceleration of Players by Age')
+text(x=seq(.7, 23, 1.2), y=c(.3), labels=by_age$age)
+text(x=seq(.7, 23, 1.2), y=(by_age$mean_acceleration-.5), labels=round(by_age$mean_acceleration,1))}
+```
+
+The acceleration plot showed a much more stable trend, looking like acceleration stays constant through around age 32 before showing a pretty steady decrease between 33 and 36. The dearth of players age 36+ explains the more wild behaviour of the data past that point.
+
+```{r}
+
+speed_vs_age <- lm(avg_speed ~ age, college_data)
+summary(speed_vs_age)
+
+x_seq <- seq(5, 50, length.out = 200)  
+predictions <- predict(speed_vs_age, newdata = data.frame(age = x_seq), interval = "confidence")
+
+no_missing <- college_data[!is.na(college_data$age),] 
+cor(no_missing$age, no_missing$avg_speed)
+
+{plot(college_data$age, college_data$avg_speed, ylim=c(0,8), xlim=c(15,45),
+      xlab = "Age (years)", 
+     ylab = "Average Speed (yd/s)",
+     main = "Relationship Between Age and Average Speed",)
+abline(speed_vs_age, col='blue', lwd=2)
+polygon(c(x_seq, rev(x_seq)), 
+        c(predictions[, "lwr"], rev(predictions[, "upr"])), 
+        col = rgb(1, 0, 0, 0.2))
+grid(col = "gray80", lty = 1)
+}
+
+```
+
+Inspired by the above bar charts, we ran a linear regression on the speed and age data. The blue line is the resulting line of best fit, with the transparent red area being the confidence interval of the line. The data showed a negative correlation which was supported by both its correlation coefficient of -.1995, and its pvalue of 3.21e-12 which suggests a statistically significant relationship. This confirmed our earlier suspicions that players slow down as they age.
+
+```{r, echo=FALSE}
+player_speed <- function(name){
+  
+  if (!(name %in% data$displayName)){
+    return(FALSE)
+  }
+  player_name <- data[data$displayName == name, ]
+  play_id <- sample(player_name$playId, 1)
+  player_play <- player_name[player_name$playId == play_id, ]
+  
+  
+  plot(player_play$frameId, player_play$s, type = "l",
+       main = paste(name, "Play Speed Over Time"), 
+       xlab = "Time Since Start of Play (Tenths of a Second)",
+       ylab = "Speed (yards/second)", 
+       col = "blue",           
+       lwd = 2,               
+       cex.main = 1.5,         
+       cex.lab = 1.2,         
+       cex.axis = 1.1,         
+       font.main = 2,          
+       las = 1,                
+       bty = "l")              
+  
+  
+  grid(nx = NULL, ny = NULL, col = "gray", lty = "dotted")
+  
+
+  
+}
+
+
+name = "Micah Parsons"
+player_name <- data[data$displayName == name, ]
+play_id <- 3183
+player_play <- player_name[player_name$playId == play_id, ]
+
+  
+{
+plot(player_play$frameId, player_play$s, type = "l",
+     main = paste(name, "Play Speed Over Time"), 
+     xlab = "Time Since Start of Play (Tenths of a Second)",
+     ylab = "Speed (yards/second)", 
+     col = "blue",           
+     lwd = 2,               
+     cex.main = 1.5,         
+     cex.lab = 1.2,         
+     cex.axis = 1.1,         
+     font.main = 2,          
+     las = 1,                
+     bty = "l")              
+}
+```
+
+This function can take the name of any player and graph their speed in yards/second over time for a random play they were in. Utilizing the base R plot graphic, we enhanced the plot by including a title, axes titles, grid ticks, and dotted grid lines, among other features. We also created error checking to ensure that the input is included in the dataset. In the example, we look at Micah Parson’s speed every 10th of a second. We choose to look at Micah Parsons because he is an extremely explosive linebacker, which is a position with a lot of change of direction when getting off blocks and adjusting to tackling the ball carrier. His speed peaks at around 3.5 seconds into the play, likely when the tackle is made, followed by deceleration.
+
+```{r}
+max_speeds <- aggregate(s ~ nflId, data = data, FUN = max)
+max_speeds <- subset(max_speeds, max_speeds$s < 18)
+max_speeds_with_positions <- merge(max_speeds, players, by = "nflId")
+ggplot(max_speeds_with_positions, aes(x = position, y = s)) +
+  geom_violin(trim = FALSE, fill = "skyblue", color = "darkblue") +
+  labs(title = "Distribution of Max Speeds by Position",
+       x = "Position",
+       y = "Max Speed (yars/sec)") +
+  theme_minimal()
+```
+The following violin plot allows one to see the distribution of max speed (a numerical variable) among multiple positions (categorical groups). As is shown, some positions clearly have faster players on average which is shown by their densities being located higher in the violin plot. For example, the majority of cornerbacks are shown to have max speeds between 7.5 yards/s and 11 yards/s, while the majority of guards have max speeds between 5 yards/s and 8 yards/s. Also, it allows one to see which positions have a greater range of max speeds among players. For example, the violin plot for middle linebacker is much more dispersed than the one for nose tackle, showing how the range of max speeds among middle linebackers is greater than that of nose tackles. This graph is useful because it allows one to easily determine which positions have faster players on average, as well as the variations of max speed in a singular position.
+
+```{r}
+ggplot(players) +
+  aes(x = reorder(position, weight, median), y = weight) +
+  geom_boxplot(fill = 'lightblue') +
+  labs(title = "Distribution of Weight by Position",
+       x = "Position",
+       y = "Weight (lbs)")
+```
+The following box plot allows one to see the distribution of weight (a numerical variable) among multiple positions (categorical groups). The boxes are organized in order of increasing median weight, with positions that have a higher median weight being located towards the right of the chart. As is shown, some positions clearly have heavier players on averages. For example, the majority of nose tackles fall between roughly 310 lbs (1st q) and 340 lbs (3rd q), while the majority of cornerbacks fall between roughly 185 lbs (1st 1) and 200 lbs (3rd q). Also, it allows one to see which positions have a greater range of weights among players. For example, the boxplot for outside linebackers shows an interquartile range of around 50 pounds, while the box plots for quarterbacks was only around 10 pounds. This graph is useful because it allows one to easily determine which positions have heavier players on average, as well as the variations of weight in a singular position.
+
+```{r}
+
+
+z_score <- function(column){
+  scoring_data <- college_data %>% filter()
+  col_mean <- mean(college_data[[column]], na.rm=TRUE)
+  col_sd <- sd(college_data[[column]], na.rm=TRUE)
+  name <- paste(as.character(column), "score", sep='_')
+  college_data[[name]] <<- (college_data[[column]] - col_mean) / col_sd
+  
+}
+
+for (trait in list(quote(heightIN),quote(weight), quote(max_speed), quote(max_accel), quote(avg_speed), quote(avg_accel))){
+  z_score(trait)
+}
+
+college_data['Athleticism_Score']<- college_data$heightIN_score+ college_data$weight_score+ college_data$max_speed_score + college_data$max_accel_score + college_data$avg_speed_score + college_data$avg_accel_score
+
+college_data[college_data$name=="Micah Parsons",]
+
+player_radar_chart <- function(player){
+  player_data<-college_data[college_data$name=="Tyreek Hill",13:19]
+  total_score <- round(college_data[college_data$name==player,20][[1]], digits=2)
+ 
+  ggradar(player_data, grid.min=-5, grid.max=5, grid.mid=0, grid.label.size = 3, 
+          values.radar = c(-5,0,5), gridline.mid.colour = 'blue', group.point.size = 3,
+          group.line.width = .75, fill=TRUE, fill.alpha = .25, 
+          axis.labels = c("Height Score", "Weight Score", "Max \nSpeed Score", 
+                          "Max Acceleration Score", "Avg \nSpeed Score", 
+                          "Avg \nAcceleration \nScore"),
+          axis.label.size = 4, plot.title = paste(player, "Athletic Traits Chart")) +
+      annotate("text", x = 12, y = 12, label = paste("Total Athleticism Score: \n",
+                                                    total_score))
+}
+
+player_radar_chart("Tyreek Hill")
+
+
+
+```
+
+To further our exploration of NFL player athleticism, we decided to implement a rudimentary athleticism score. This score is created by taking the 6 athletic traits provided in the data
+and creating z-scores for each, with the z-score being the player's score. To create the total athleticism score the scores for each individual trait was summed. To plot this data we used radar charts where each point on the circle is the player score, and the blue dotted line is the average for each score. This allows a clear way to see above and below average traits by looking at the point in reference to the average marking. On the plot we also added the total athleticism score to further contextualize the player.
+
+```{r}
+
+grouppos <- function(df){
+  unique_items<-unique(df$position)
+  grouped_data <- data.frame(position=character(),
+                             mean_speed_score=double(),
+                             mean_acceleration_score=double(),
+                             max_acceleration_score=double(),
+                             max_speed_score=double(),
+                             height_score=double(),
+                             weight_score=double(),
+                             athleticism_score=double(),
+                             stringsAsFactors = FALSE)
+  for (token in unique_items){
+    individ_data <-df[df$position==token,]
+    meanspeedscore <- mean(individ_data$avg_speed_score, na.rm=TRUE)
+    meanaccelscore <- mean(individ_data$avg_accel_score, na.rm=TRUE)
+    maxaccelscore <- mean(individ_data$max_accel_score, na.rm=TRUE)
+    maxspeedscore <- mean(individ_data$max_speed_score, na.rm=TRUE)
+    heightscore <- mean(individ_data$heightIN_score, na.rm=TRUE)
+    weightscore <- mean(individ_data$weight_score, na.rm=TRUE)
+    athleticismscore <- mean(individ_data$Athleticism_Score, na.rm=TRUE)
+    grouped_data <- rbind(grouped_data, data.frame(
+      position=token,
+      mean_speed_score=meanspeedscore,
+      mean_acceleration_score=meanaccelscore,
+      max_acceleration_score=maxaccelscore,
+      max_speed_score=maxspeedscore,
+      height_score=heightscore,
+      weight_score=weightscore,
+      athleticism_score=athleticismscore,
+      stringsAsFactors = FALSE
+    ))
+  }
+  return(grouped_data)
+}
+
+position_data <- grouppos(college_data)
+position_data <- position_data[order(position_data$athleticism_score),]
+
+ggplot(position_data, aes(x = reorder(position, athleticism_score), y = athleticism_score, fill = athleticism_score > 0)) +
+  geom_bar(stat="identity") + 
+  scale_fill_manual(values = c("TRUE" = "red", "FALSE" = "blue"))+
+  coord_flip() + 
+  theme_minimal() + 
+  labs(title = "Diverging Plot by Position", x = "Position", y = "Athleticism") +
+  theme(legend.position = "none")
+
+
+```
+
+Because our creation of athleticism score was done ignoring position, we wanted to see how the score would look across various positions. We assumed that in particular offensive line positions would be disadvantaged as in game they have are not running or accelerating at full speed, hurting their scores their, and our score does not directly factor in traits like strength where they would have a large advantage. Through a differential plot we confirmed our hypothesis as the bottom 4 positions by athleticism score were linemen. Outside of DB, which had very few players, the rest of the positions made sense as they are generally above average in height and weight for the NFL and would have opportunities to sprint frequently, enabling a good showing in our athleticism score. The path to a more fair scoring would either be done relative to position or to derive factors like strength or power through the data. 
+
+```{r}
+z_score_by_position <- function(column, pos){
+  scoring_data <- college_data %>% filter(position==pos)
+  col_mean <- mean(scoring_data[[column]], na.rm=TRUE)
+  col_sd <- sd(scoring_data[[column]], na.rm=TRUE)
+  name <- paste(pos, as.character(column), "score", sep='_')
+  college_data[[name]] <<- (college_data[[column]] - col_mean) / col_sd
+}
+
+for (trait in list(quote(heightIN),quote(weight), quote(max_speed), quote(max_accel), quote(avg_speed), quote(avg_accel))){
+  for (posit in unique(college_data$position)){
+    z_score_by_position(trait, posit)
+  }
+}
+
+for (posit in unique(college_data$position)){
+  
+  height_score_col <- paste(posit, 'heightIN_score', sep = "_")
+  weight_score_col <- paste(posit, 'weight_score', sep = "_")
+  max_speed_col <- paste(posit, 'max_speed_score', sep = "_")
+  max_accel_col <- paste(posit, 'max_accel_score', sep = "_")
+  avg_speed_col <- paste(posit, 'avg_speed_score', sep = "_")
+  avg_accel_col <- paste(posit, 'avg_accel_score', sep = "_")
+  
+  name <- paste(posit, 'Athleticism_Score', sep="_" )
+  
+  college_data[[name]] <- college_data[[height_score_col]] + 
+    college_data[[weight_score_col]] + 
+    college_data[[max_speed_col]] + 
+    college_data[[max_accel_col]] + 
+    college_data[[avg_speed_col]] + 
+    college_data[[avg_accel_col]]
+}
+
+
+player_radar_chart_pos_adj <- function(player){
+  player_data<-college_data[college_data$name==player,]
+  pos <- unique(player_data$position)
+  
+  height_score_col <- paste(pos, 'heightIN_score', sep = "_")
+  weight_score_col <- paste(pos, 'weight_score', sep = "_")
+  max_speed_col <- paste(pos, 'max_speed_score', sep = "_")
+  max_accel_col <- paste(pos, 'max_accel_score', sep = "_")
+  avg_speed_col <- paste(pos, 'avg_speed_score', sep = "_")
+  avg_accel_col <- paste(pos, 'avg_accel_score', sep = "_")
+  total_score_col <- paste(pos, 'Athleticism_Score', sep="_" )
+  col_list <- c("age",height_score_col, weight_score_col, max_speed_col, max_accel_col, 
+                avg_speed_col, avg_accel_col)
+  
+  player_data <- college_data[college_data$name==player,col_list]
+  
+  total_score <- round(college_data[college_data$name==player,total_score_col][[1]], digits=2)
+ 
+  ggradar(player_data, grid.min=-5, grid.max=5, grid.mid=0, grid.label.size = 3, 
+          values.radar = c(-5,0,5), gridline.mid.colour = 'blue', group.point.size = 3,
+          group.line.width = .75, fill=TRUE, fill.alpha = .25, 
+          axis.labels = c("Height Score", "Weight Score", "Max \nSpeed Score", 
+                          "Max Acceleration Score", "Avg \nSpeed Score", 
+                          "Avg \nAcceleration \nScore"),
+          axis.label.size = 4, plot.title = paste(player, "Athletic Traits Chart")) +
+      annotate("text", x = 12, y = 12, label = paste("Total Athleticism Score: \n",
+                                                    total_score))
+}
+
+player_radar_chart_pos_adj("A.J. Brown")
+```
+
+
+
+```{r}
+college_data$final_score <- NA
+for (i in 1:nrow(college_data)) {
+  posit <- college_data$position[i]  
+  score_col <- paste(posit, 'Athleticism_Score', sep = "_")  
+  college_data$final_score[i] <- college_data[[score_col]][i] 
+}
+
+position_data_adj <- college_data %>% group_by(position) %>% 
+  summarise(athleticism_score = mean(final_score))
+
+ggplot(position_data_adj, aes(x = reorder(position, athleticism_score), y = athleticism_score, fill = athleticism_score > 0)) +
+  geom_bar(stat="identity") + 
+  scale_fill_manual(values = c("TRUE" = "red", "FALSE" = "blue"))+
+  coord_flip() + 
+  theme_minimal() + 
+  labs(title = "Diverging Plot by Position", x = "Position", y = "Athleticism") +
+  theme(legend.position = "none")+
+  ylim(-1, 1) 
+```
+
+```{r}
+hist(plays$expectedPointsAdded, 
+     main = "Expected Points Added for a Play",
+     xlab = "Expected Points Added",
+     col = "lightblue",
+     xlim = c(-10, 10),
+     border = "black",
+     breaks = 20,
+     las = 1
+     )
+```
+
+The depicts a histogram illustrating the expected points added per play. The expected points added metric takes the difference between the expected points from the start and end of a given play. We added many features to this graph, including a customized amount of bins for the histogram and adding color to the bars to make them visually appealing. We also fitted the x-axis to cover the full range of possible EPAs. The output of this plot is interesting since it looks normally distributed with a skew to the right. This makes sense since the majority of plays would have little to no positive EPA.
+
+Outside of the required plots, we also explored the relationship between yards gained and expected points added in the below plots. This exploration was inspired by our histogram.
+
+```{r}
+#Basic all plays analyzed
+
+lmfs <- lm(expectedPointsAdded ~ playResult, data = plays)
+summary(lmfs)
+{
+plot(plays$playResult, plays$expectedPointsAdded, main="Expected points added and yards gained on the play",
+xlab = "Yards gained on the play", ylab = "Expected number of points added")
+abline(reg = lmfs, col = "blue", lwd = 2)
+}
+```
+
+This first plot is an examination of all plays run and analyzes the play result vs the expected points added by the play. Expected points added is calculated by taking the expected points value before and after the play and taking the difference between them. There is a moderate positive correlation between play result and expected points added which means that a positive play result moderately correlates with a positive expected points added.
+
+```{r}
+#Seperate by Formation
+shotgun <- plays[plays$offenseFormation == "SHOTGUN",]
+iform <- plays[plays$offenseFormation == "I_FORM",]
+singleback <- plays[plays$offenseFormation == "SINGLEBACK",]
+empty <- plays[plays$offenseFormation == "EMPTY",]
+pistol <- plays[plays$offenseFormation == "PISTOL",]
+wildcat <- plays[plays$offenseFormation == "WILDCAT",]
+jumbo <- plays[plays$offenseFormation == "JUMBO",]
+
+lmfs <- lm(expectedPointsAdded ~ playResult, data = shotgun)
+summary(lmfs)
+
+#Plot of all Shotgun plays
+{plot(shotgun$playResult, shotgun$expectedPointsAdded, main="Expected points added based on yards gained on shotgun plays",
+xlab = "Yards gained on the play", ylab = "Expected number of points added")
+abline(lmfs, col = "blue", lwd = 2)}
+
+```
+
+This second plot is an examination of all plays run out of shotgun formation and analyzes the play result vs the expected points added by the play. Expected points added is calculated by taking the expected points value before and after the play and taking the difference between them. There is a moderate positive correlation between play result and expected points added which means that a positive play result moderately correlates with a positive expected points added. This correlation is slightly weaker than with all plays run, meaning that play results in shotgun correlates with expected points added less than overall.
+
+```{r}
+foot <- data[data$displayName == "football", ]
+
+foot <- foot[foot$event == "pass_outcome_caught", ]
+foot <- foot[!apply(is.na(foot), 1, all), ]
+
+foot$x <- floor(foot$x / 2) * 2
+foot$y <- floor(foot$y / 2) * 2
+
+catch_counts <- aggregate(cbind(catches = rep(1, nrow(foot))), 
+                          by = list(x = foot$x, y = foot$y), FUN = sum)
+
+ggplot(catch_counts, aes(x = x, y = y, fill = catches)) + geom_tile() + 
+  scale_fill_gradient(low = "white", high = "blue") + 
+  coord_fixed(ratio = 1) +
+  labs(title = "Heatmap of NFL Passes Caught in 2x2 boxes",
+       x = "Field Length",
+       y = "Field Width")
+```
+The heatmap shows the passes caught in each 2-yard by 2-yard section in the field. I chose to use these dimensions since 1 yard by 1 yard made the graph clustered and borderline unreadable. Since this dataset includes football in its tracking we were able to see the position of the ball at the time of the catch. I then created a heatmap to illustrate where passes were thrown on an NFL field. Most passes were completed near the hash marks between the 20 yard lines. This would make sense since the hash marks are a safe location for QBs to throw the ball and near where receivers line up. In addition, the vast majority of plays take place between the 20-yard lines. 
+
+```{r}
+#Score Differential Density Plot
+home_team_point_differential <- games$homeFinalScore - games$visitorFinalScore
+collegeteam <- data.frame(value = home_team_point_differential)
+ggplot(collegeteam, aes(x = value)) +
+geom_density(fill = "blue", alpha = 0.5) + 
+labs(title = "Point Differential by Home team",
+x = "Point Differential", y = "Density")
+```
+This density plot illustrates the point differential for the home team during the first 9 weeks of the NFL season. The plot is smoothed so it means that a higher value is a generally higher value in that area, but not necessarily at that spot. A positive point differential means that the home team won and a negative point differential means that the away team won. A point differential of 0 means that the game ended in a tie. The density value is the amount out of all games that ended in that point differential
+
+
+
+  
+
+
+
+
+
+
+
+

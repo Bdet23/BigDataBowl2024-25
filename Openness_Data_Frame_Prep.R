@@ -94,5 +94,9 @@ throws <- throws %>% select(gameId, playId, throw_speed)
 oplayer_data <- oplayer_data %>% merge(throws, by=c("gameId", "playId"))
 oplayer_data <- oplayer_data %>% distinct()
 
+fpos <- football_data %>% select(gameId, playId, frameId, fx=x, fy=y)
+oplayer_data <- oplayer_data %>% merge(fpos, by=c("gameId", "playId", "frameId")) %>% distinct()
+rm(track_data)
+
 dbWriteTable(dcon, "cleaned_player_data", oplayer_data)
 dbListTables(dcon)

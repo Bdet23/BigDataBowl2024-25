@@ -6,25 +6,6 @@ dcon <- dbConnect(SQLite(), "BDB2025.db")
 
 dbListTables(dcon)
 
-res <- dbSendQuery(conn = dcon, "
-                   SELECT * FROM all_weeks as a
-                   LEFT JOIN plays as b ON a.playId = b.playId
-                   AND a.gameId = b.gameId 
-                   WHERE isDropback == 1 AND
-                   frameType = 'AFTER_SNAP'")
-
-
-data <- dbFetch(res, -1)
-
-
-
-player_speed <- 10
-player_x <- 15
-player_y <- 8
-ball_speed <- 20
-ball_x <- 0
-ball_y <- 0
-i <- 30
 partial_radius <- function(player_speed, 
                            player_x, player_y, ball_speed, ball_x, ball_y){
   radius <- c(numeric(360))
@@ -81,7 +62,6 @@ partial_radius <- function(player_speed,
     x1 <- cos(player_angle)*player_speed*time + player_x
     x2 <- cos(ball_angle)*ball_speed*time + ball_x
     
-    if (((y1-y2)^2 + (x1-x2)^2) > 0.2) (cat("angle:", i, "distance", sqrt((y1-y2)^2 + (x1-x2)^2), "\n"))
     
     intercept_x <- x1
     intercept_y <- y1
@@ -100,8 +80,6 @@ partial_radius <- function(player_speed,
 
 
 
-offensive_data <- partial_radius(10, 15, 8, 20, 3, 5)
-
 
 
 #revised version
@@ -114,12 +92,9 @@ offensive_data <- partial_radius(10, 15, 8, 20, 3, 5)
 #this function assumes that in denfensive player data the order is 
 #dplayer_x, dplayer_y, and dplayer_speed
 
-oplayer_speed <- 10
-oplayer_x <- 15
-oplayer_y <- 8
 
 
-overlap <- function(oplayer_speed, 
+overlap <- function(oplayer_speed, player_direction,
                     oplayer_x, oplayer_y, defensive_player_data, 
                     ball_speed, ball_x, ball_y){
   
@@ -136,21 +111,21 @@ overlap <- function(oplayer_speed,
   off_pos_y <- offensive_data[[3]]
   
   #max radius to help set the box
-  omax <- max(rad)
+  omax <- max(rad, 1)
   
   #setting the simulated restrictions with the field as restrictions also
   minx <- max(min(oplayer_x - omax), 0)
-  print(minx)
-  maxx <- min(max(oplayer_x + omax), 53.3)
-  print(maxx)
+  
+  maxx <- min(max(oplayer_x + omax), 120)
+  
   miny <- max(min(oplayer_y - omax), 0)
-  print(miny)
-  maxy <- min(max(oplayer_y + omax), 120)
-  print(maxy)
+  
+  maxy <- min(max(oplayer_y + omax), 53.3)
+  
   
   #taking area of restricted box with 100 points per square yard
   num_sims <- abs((maxx - minx) * (maxy - miny) * 100)
-  print(num_sims)
+  
   #running x and y simulated data
   xsim <- runif(num_sims, min = minx, max = maxx)
   ysim <- runif(num_sims, min = miny, max = maxy)
@@ -179,7 +154,7 @@ overlap <- function(oplayer_speed,
   
   #measuring if the offsive player can reach the simulated point
   #o_radius <- partial_radius(oplayer_speed, oplayer_x, 
-                             #oplayer_y, ball_speed, ball_x, ball_y)
+  #oplayer_y, ball_speed, ball_x, ball_y)
   o_radius <- rad
   
   o_dist_to_point <- sqrt(o_xdist^2 + o_ydist^2)
@@ -190,21 +165,38 @@ overlap <- function(oplayer_speed,
     o_radius[index] >= o_dist_to_point[i]
   })
   
+  point_angle <- atan2(ysim - oplayer_y, xsim - oplayer_x)
+  
+  #Ensure angles are in the range [0, 2*pi]
+  point_angle <- ifelse(point_angle >= 0, point_angle, 2 * pi + point_angle)
+  
+  #Convert player_direction to the range [0, 2*pi] if not already
+  player_dir <- ifelse(player_direction >= 0, player_direction, 2 * pi + player_direction)
+  
+  #Define a directional threshold (in radians, e.g., ±22.5 degrees = π/8 radians)
+  threshold <- pi / 8
+  
+  #Check if the simulated point is in the player's direction
+  in_direction <- abs(point_angle - player_direction) <= threshold |
+    abs(point_angle - player_direction - 2 * pi) <= threshold |
+    abs(point_angle - player_direction + 2 * pi) <= threshold
+  
   #creating a binary matrix 1st col is the offensive player openness for each point
   #other columns is the denfensive players openess
-  openness_matrix <- data.frame(o_open, dopen)
-  open_cond <- (openness_matrix[ ,1]==1) & rowSums(openness_matrix[ ,-1] == 0)
+  openness_matrix <- data.frame(o_open, dopen, in_direction)
+  open_cond <- ifelse(openness_matrix$o_open == 1, 
+                      ifelse(rowSums(openness_matrix[, 2, drop = FALSE]) == 0, 
+                             1 + 0.2 * openness_matrix$in_direction, 
+                             ifelse(rowSums(openness_matrix[, 2, drop = FALSE]) > 1, 
+                                    -0.2 * rowSums(openness_matrix[, 2, drop = FALSE]), 0)), 
+                      0)
   
+  # Sum the open conditions
   open_count <- sum(open_cond)
   
   
   return(open_count)
 }
-
-defensive_player_data <- list(c(0, 0, 7), c(10, 12, 5), c(16, 30, 8))
-defensive_player_data[[1]][[1]]
-overlap(10, 15, 8, defensive_player_data, 20, 0, 0)
-
 
 res <- dbSendQuery(conn = dcon, "
 SELECT *
@@ -229,21 +221,20 @@ process_chunk <- function(data_chunk) {
     oplayer_speed <- as.numeric(row["s"])
     oplayer_x <- as.numeric(row["x"])
     oplayer_y <- as.numeric(row["y"])
-    
+    oplayer_dir <- as.numeric(row["dir"])
     # Defensive player data
     defensive_player_data <- lapply(1:11, function(i) {
       list(as.numeric(row[paste0("x_", i)]), 
            as.numeric(row[paste0("y_", i)]), 
            as.numeric(row[paste0("s_", i)]))
     })
-    print(is.numeric(defensive_player_data[[1]][1]))
     # Ball parameters
     ball_speed <- as.numeric(row["throw_speed"])
     ball_x <- as.numeric(row["fx"])
     ball_y <- as.numeric(row["fy"])
     
     # Run the overlap function
-    overlap(oplayer_speed, oplayer_x, oplayer_y, defensive_player_data, ball_speed, ball_x, ball_y)
+    overlap(oplayer_speed, oplayer_dir, oplayer_x, oplayer_y, defensive_player_data, ball_speed, ball_x, ball_y)
   })
   return(data_chunk)
 }
@@ -255,16 +246,13 @@ chunks <- lapply(split_indices, function(i) {
 })
 
 # Process chunks in parallel
-result_chunks <- future_lapply(chunks, process_chunk)
+result_chunks <- future_lapply(chunks, process_chunk, future.seed=TRUE)
 
 # Combine chunks into a single DataFrame
 final_data <- do.call(rbind, result_chunks)
 
 # Clean up parallel resources
 plan(sequential)
-
-#dbWriteTable(dcon, "radius_data", final_data)
-#dbListTables(dcon)
 
 final_data <- final_data %>%
   arrange(gameId, playId, frameId) %>% # Ensure data is sorted
@@ -279,4 +267,7 @@ vs_coverage <- final_data %>% group_by(routeRan, pff_defensiveCoverageAssignment
     avg_openness = mean(open_count, na.rm=T)
   )
 
-
+dbWriteTable(dcon, "radius_data", final_data)
+dbListTables(dcon)
+test<-matrix(c(1,0,1,1,1,1,0,0,0),nrow=3, ncol=3)
+test[,2]

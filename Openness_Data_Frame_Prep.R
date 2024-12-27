@@ -27,7 +27,7 @@ f_player_play <- dbFetch(res, -1)
 dbClearResult(res)
 
 unique(data$event)
-track_data <- data[,-c(19,20)] %>% select(gameId,playId,nflId,frameId,x,y,s)
+track_data <- data[,-c(19,20)] %>% select(gameId,playId,nflId,frameId,x,y,s, dir)
 
 oplayer_data <- track_data %>% merge(f_player_play, by=c("gameId", "playId", "nflId"))
 

@@ -55,6 +55,20 @@ partial_radius <- function(player_speed,
     x2 <- cos(ball_angle)*ball_speed*time + ball_x
     
     
+    if (x1 < 0){
+      x1 <- 0
+    }
+    else if (x1 > 120) {
+      x1 <- 120
+    }
+    
+    if (y1 < 0){
+      y1 <- 0
+    }
+    else if (y1 > 53.34){
+      y1 <- 53.33
+    }
+    
     intercept_x <- x1
     intercept_y <- y1
     
@@ -70,3 +84,8 @@ partial_radius <- function(player_speed,
   
   return(df)
 }
+
+
+a <- data[51, ]
+
+partial_radius(20, 110, 45, 20, 80, 40)

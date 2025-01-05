@@ -27,7 +27,7 @@ for (row in seq_len(nrow(data))){
   
   cov <- data[row, "actual_coverage"]
   col <- paste("prob_", cov, sep="" )
-  if (data[row, col] > .2 & data[row, "actual_coverage"] == data[row, "predicted_coverage"]) {
+  if (data[row, col] > .8 | data[row, "actual_coverage"] == data[row, "predicted_coverage"]) {
     dig[row] <- 0
   } else {
     dig[row] <- 1
@@ -36,7 +36,7 @@ for (row in seq_len(nrow(data))){
 
 sum(dig)
 
-
+data$disguised <- dig
 
 
 

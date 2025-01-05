@@ -95,7 +95,6 @@ fill_na_with_nearest <- function(df, col_range) {
 
 throw <- data %>% filter(event == "pass_arrived" & wasTargettedReceiver == 1)
 
-test <- throw %>% select(gameId, playId, nflId, timeToThrow, firstRead, secondRead, thirdRead, fourthRead, fifthRead, firstTarget, secondTarget, thirdTarget, fourthTarget, fifthTarget)
   # Step 1: Compute throw_id
 throw$throw_id <- round(throw$timeToThrow, digits = 1) * 10
   
@@ -122,7 +121,7 @@ throw$is_expected_receiver <- with(throw, {
 })
   
 # Step 8: Return the relevant columns
-throw <- throw %>% select(gameId, playId, is_expected_receiver)
+mthrow <- throw %>% select(gameId, playId, is_expected_receiver)
 
 sum(is.na(throw$is_expected_receiver))
 
@@ -138,7 +137,7 @@ players <- players %>% select(nflId, position)
 
 qb_data <- data %>% merge(players, by="nflId") %>% filter(position == "QB")  %>%
   distinct(gameId, playId, .keep_all = TRUE) %>% select(gameId, playId, nflId)
-qb_data <- qb_data %>% merge(throw, by = c("gameId", "playId"))
+qb_data <- qb_data %>% merge(mthrow, by = c("gameId", "playId"))
 
 results <- qb_data %>% group_by(nflId) %>% summarise(
   expected_read_percentage = sum(is_expected_receiver)/n()
@@ -154,3 +153,203 @@ qbs <- dbFetch(res, -1)
 dbClearResult(res)
 
 results <- results %>% merge(qbs, by="nflId")
+
+mean(results$expected_read_percentage)
+################ Generating Effective Read Percentage ##################
+#This is looking for false positives - their was a better read at time of throw even though QB took expected
+#Also looks for bad reads -  the expected read was more open than the actual target
+
+rm(throw_filled)
+
+res <- dbSendQuery(conn = dcon, "
+SELECT *
+FROM radius_data;
+")
+
+open_data <- dbFetch(res, -1)
+dbClearResult(res)
+
+
+throw$expected_receiver <- with(throw, {
+  nflId_expected <- mapply(function(row, col) throw[row, col], seq_len(nrow(throw)), throw$expected_column)
+  nflId_expected
+})
+
+needed_throws <- throw %>% select(gameId, playId, target = nflId, expected_receiver, throw_id, is_expected_receiver)
+
+open_data <- open_data %>% merge(needed_throws, by = c("gameId", "playId")) %>% filter(throw_id == secondId)
+
+most_open <- open_data %>% group_by(gameId, playId) %>%
+  slice_max(open_count, n = 1, with_ties = FALSE) %>%
+  ungroup() %>% select(gameId, playId, most_open_rec = nflId, most_open_count = open_count)
+
+actual_open <- open_data %>% filter(target==nflId) %>% 
+  select(gameId, playId, target, target_open_count = open_count)
+
+expected_open <- open_data %>% filter(expected_receiver==nflId) %>% 
+  select(gameId, playId, expected_receiver, expected_open_count = open_count)
+
+openness <- most_open %>% merge(actual_open, by=c("gameId", "playId")) %>%
+  merge(expected_open, by=c("gameId", "playId"))
+
+openness$correct_read <- ifelse(openness$expected_open_count > openness$target_open_count, 0, 
+                                ifelse(openness$target_open_count > openness$expected_open_count, 1,
+                                       ifelse(openness$expected_receiver==openness$target & openness$most_open_count > openness$expected_open_count, 0,1)))
+
+openness$fail_to_leave <- ifelse(openness$expected_receiver==openness$target & openness$most_open_count > openness$expected_open_count, 1,0)
+openness$hit_pre_snap <- openness$expected_receiver == openness$target
+
+needed_openness <- openness %>% select(gameId, playId, correct_read, fail_to_leave, hit_pre_snap)
+
+qb_data <- qb_data %>% merge(needed_openness, by = c("gameId", "playId"))
+
+effective_read_percentage <- qb_data %>% group_by(nflId) %>% summarise(
+  effective_read_percentage = sum(correct_read)/n(),
+  stuck_to_pre_rate = sum(fail_to_leave)/n(),
+  throw_to_pre_rate = sum(hit_pre_snap)/n(),
+  snaps = n()
+)
+
+
+effective_read_percentage <- effective_read_percentage %>% merge(qbs, by="nflId")
+
+openness$is_exp_max <- ifelse(openness$expected_receiver == openness$most_open_rec, 1, 0)
+
+sum(openness$is_exp_max)/5393
+
+effective_read_percentage$PRESS <- (effective_read_percentage$effective_read_percentage / mean(effective_read_percentage$effective_read_percentage)) * 100
+
+qualified_data <- effective_read_percentage %>% filter(snaps >= 100)
+
+qualified_data$qualified_press <- (qualified_data$effective_read_percentage / mean(qualified_data$effective_read_percentage)) * 100
+
+library(gt)
+library(htmltools)
+
+# Top 10 rows
+top_table <- qualified_data %>% select(Name = displayName, Snaps = snaps, qualified_press) %>%
+  arrange(desc(qualified_press)) %>%
+  slice(1:10) %>%
+  gt() %>%
+  tab_header(
+    title = "Top 10 QBs"
+  )  %>%
+  as_raw_html()
+
+# Bottom 10 rows
+bottom_table <- qualified_data %>% select(Name = displayName, Snaps = snaps, qualified_press) %>%
+  arrange(desc(qualified_press)) %>%
+  slice(24:33) %>%
+  gt() %>%
+  tab_header(
+    title = "Bottom 10 QBs"
+  )  %>%
+  as_raw_html()
+
+# Combine tables side by side
+html_output <- htmltools::tags$div(
+  style = "display: flex; justify-content: center; gap: 10px;", # Reduced gap for closer tables
+  htmltools::tags$div(style = "margin-right: 5px;", HTML(top_table)),
+  htmltools::tags$div(style = "margin-left: 5px;", HTML(bottom_table))
+)
+
+# Render HTML in Kaggle notebook
+html_output
+htmltools::save_html(html_output, "side_by_side_tables.html")
+
+# Open in the browser
+browseURL("side_by_side_tables.html")
+
+write.csv(qualified_data, file = "press_data.csv", row.names = FALSE)
+
+############## Looking at Motion #####################
+
+res <- dbSendQuery(conn = dcon, "
+SELECT gameId, playId, motionSinceLineset
+FROM player_play
+WHERE motionSinceLineset = True;
+")
+
+motion <- dbFetch(res, -1)
+dbClearResult(res)
+
+motion <- motion %>% unique()
+
+motion_open <- needed_openness %>% merge(motion, by=c("gameId", "playId")) 
+
+(motion_press <- mean(motion_open$correct_read)/mean(effective_read_percentage$effective_read_percentage) * 100)
+
+############# Looking in the Redzone #################
+
+res <- dbSendQuery(conn = dcon,"
+SELECT gameId, playId, absoluteYardlineNumber
+FROM plays
+WHERE absoluteYardlineNumber <= 20;
+")
+
+redzone_plays <-  dbFetch(res, -1)
+dbClearResult(res)
+
+redzone_open <- needed_openness %>% merge(redzone_plays, by=c("gameId", "playId"))
+
+(redzone_press <- mean(redzone_open$correct_read)/mean(effective_read_percentage$effective_read_percentage) * 100)
+
+res <- dbSendQuery(conn = dcon,"
+SELECT gameId, playId, absoluteYardlineNumber, pff_passCoverage
+FROM plays
+WHERE absoluteYardlineNumber <= 20;
+")
+
+redzone_coverage <-  dbFetch(res, -1)
+dbClearResult(res)
+
+res <- dbSendQuery(conn = dcon,"
+SELECT gameId, playId, absoluteYardlineNumber, pff_passCoverage
+FROM plays;
+")
+
+allsit_coverage <-  dbFetch(res, -1)
+dbClearResult(res)
+
+redzone_coverage <- redzone_coverage %>% group_by(pff_passCoverage) %>% 
+  summarise(times_ran = n()) %>% arrange(times_ran)
+
+allsit_coverage <- allsit_coverage %>% group_by(pff_passCoverage) %>% 
+  summarise(times_ran = n()) %>% arrange(times_ran)
+
+redzone_coverage$ratio <- redzone_coverage$times_ran / sum(redzone_coverage$times_ran)
+allsit_coverage$ratio <- allsit_coverage$times_ran / sum(allsit_coverage$times_ran)
+
+
+(num_coverages<-length(unique(redzone_coverage$pff_passCoverage)))
+
+(num_coverages<-length(unique(allsit_coverage$pff_passCoverage)))
+
+plot(redzone_coverage$ratio, cumsum(redzone_coverage$ratio))
+
+library(entropy)
+
+# Normalize frequencies to probabilities
+probs_redzone <- redzone_coverage$times_ran / sum(redzone_coverage$times_ran)
+probs_normal <- allsit_coverage$times_ran / sum(allsit_coverage$times_ran)
+
+# Calculate entropy
+entropy_redzone <- entropy(probs_redzone, unit = "log2") # Entropy in bits
+entropy_normal <- entropy(probs_normal, unit = "log2")
+
+# Compare
+print(paste("Redzone Entropy:", entropy_redzone))
+print(paste("Normal Entropy:", entropy_normal))
+
+cv_redzone <- sd(redzone_coverage$times_ran) / mean(redzone_coverage$times_ran)
+cv_normal <- sd(allsit_coverage$times_ran) / mean(allsit_coverage$times_ran)
+
+# Compare
+print(paste("Redzone CV:", cv_redzone))
+print(paste("Normal CV:", cv_normal))
+
+####### Looking at Components #######
+
+
+####### Expected Throw EPA ###########
+
